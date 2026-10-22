@@ -1,83 +1,33 @@
 #!/bin/bash
 
 # =====================================================
-# Cloudflare DDNS 生产级一键安装与管理脚本 (GitHub 版)
-# 兼容性：Systemd (Ubuntu/Debian/CentOS) & Crontab (Alpine)
+# Cloudflare DDNS 全平台自适应安装脚本 (带 IP 缓存优化版)
+# 兼容性：Systemd (Ubuntu/Debian/CentOS) & OpenRC (Alpine)
 # =====================================================
 
-CONFIG_FILE="/etc/cf-ddns.conf"
-SCRIPT_PATH="/usr/local/bin/cf-ddns.sh"
-SERVICE_PATH="/etc/systemd/system/cf-ddns.service"
-TIMER_PATH="/etc/systemd/system/cf-ddns.timer"
-
-# 1. 权限检查
+# --- 1. 环境准备与权限检查 ---
 if [[ $EUID -ne 0 ]]; then
-   echo "❌ 错误: 必须使用 root 权限运行此脚本！"
-   echo "请尝试使用: sudo bash $0"
+   echo "❌ 错误: 必须使用 root 权限运行!"
    exit 1
 fi
 
-# 加载现有配置（如果存在）
-if [ -f "$CONFIG_FILE" ]; then
-    source "$CONFIG_FILE"
-fi
+# --- 2. 配置输入 ---
+echo "====================================================="
+echo "        Cloudflare DDNS 安装向导 (带 IP 缓存)"
+echo "====================================================="
+read -p "1. 请输入 Cloudflare API Token: " CF_TOKEN
+read -p "2. 请输入 Zone ID: " ZONE_ID
+read -p "3. 请输入 IPv4 域名 (不填请直接回车): " NAME_V4
+read -p "4. 请输入 IPv6 域名 (不填请直接回车): " NAME_V6
 
-show_menu() {
-    clear
-    echo "====================================================="
-    echo "        Cloudflare DDNS 管理与安装面板"
-    echo "====================================================="
-    echo " 1. 安装 / 更新 DDNS 配置并启动服务"
-    echo " 2. 手动执行一次 DDNS 更新测试"
-    echo " 3. 查看最近运行日志"
-    echo " 4. 卸载 DDNS 及清理相关文件"
-    echo " 0. 退出脚本"
-    echo "-----------------------------------------------------"
-    read -p "请选择操作 [0-4]: " CHOICE
-}
-
-install_ddns() {
-    echo "====================================================="
-    echo "          Cloudflare DDNS 配置向导"
-    echo "====================================================="
-    read -p "1. 请输入 Cloudflare API Token [${CF_TOKEN:-}]: " input_token
-    CF_TOKEN="${input_token:-$CF_TOKEN}"
-
-    read -p "2. 请输入 Zone ID [${ZONE_ID:-}]: " input_zone
-    ZONE_ID="${input_zone:-$ZONE_ID}"
-
-    read -p "3. 请输入 IPv4 域名 (不填请直接回车) [${NAME_V4:-}]: " input_v4
-    NAME_V4="${input_v4:-$NAME_V4}"
-
-    read -p "4. 请输入 IPv6 域名 (不填请直接回车) [${NAME_V6:-}]: " input_v6
-    NAME_V6="${input_v6:-$NAME_V6}"
-
-    if [ -z "$CF_TOKEN" ] || [ -z "$ZONE_ID" ]; then
-        echo "❌ 错误: API Token 和 Zone ID 不能为空！"
-        read -p "按回车键返回主菜单..."
-        return
-    fi
-
-    # 保存配置文件 (权限设为 600 保护 Token 安全)
-    cat << EOF > "$CONFIG_FILE"
-CF_TOKEN="$CF_TOKEN"
-ZONE_ID="$ZONE_ID"
-NAME_V4="$NAME_V4"
-NAME_V6="$NAME_V6"
-EOF
-    chmod 600 "$CONFIG_FILE"
-
-    # 生成核心执行脚本 /usr/local/bin/cf-ddns.sh
-    cat << 'EOF' > "$SCRIPT_PATH"
+# --- 3. 生成执行脚本 ---
+cat << 'EOF' > /usr/local/bin/cf-ddns.sh
 #!/bin/bash
 
-CONFIG_FILE="/etc/cf-ddns.conf"
-if [ -f "$CONFIG_FILE" ]; then
-    source "$CONFIG_FILE"
-else
-    echo "❌ 配置文件不存在: $CONFIG_FILE"
-    exit 1
-fi
+CF_TOKEN="REPLACE_CF_TOKEN"
+ZONE_ID="REPLACE_ZONE_ID"
+NAME_V4="REPLACE_NAME_V4"
+NAME_V6="REPLACE_NAME_V6"
 
 CACHE_DIR="/var/lib/cf-ddns"
 mkdir -p "$CACHE_DIR"
@@ -91,10 +41,12 @@ update_record() {
         return 0
     fi
 
+    # 查询记录
     API_URL="https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?type=$TYPE&name=$RECORD_NAME"
     RESPONSE=$(curl -s -m 15 -X GET "$API_URL" -H "Authorization: Bearer $CF_TOKEN" -H "Content-Type: application/json")
     RECORD_IDS=$(echo "$RESPONSE" | grep -o '"id":"[^"]*' | cut -d'"' -f4)
 
+    # 逻辑：无记录则新增，有记录则更新第一条并清理其余重复项
     if [ -z "$RECORD_IDS" ]; then
         curl -s -m 15 -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" \
              -H "Authorization: Bearer $CF_TOKEN" -H "Content-Type: application/json" \
@@ -127,6 +79,9 @@ if [ -n "$NAME_V4" ]; then
             echo "[$(date)] IPv4 变动: $OLD_IPV4 -> $IPV4_VAL，正在更新 Cloudflare..."
             update_record "A" "$IPV4_VAL" "$NAME_V4"
             echo "$IPV4_VAL" > "$V4_CACHE_FILE"
+        else
+            # IP 未变，跳过 API 提交
+            true
         fi
     fi
 fi
@@ -143,6 +98,9 @@ if [ -n "$NAME_V6" ]; then
             echo "[$(date)] IPv6 变动: $OLD_IPV6 -> $IPV6_VAL，正在更新 Cloudflare..."
             update_record "AAAA" "$IPV6_VAL" "$NAME_V6"
             echo "$IPV6_VAL" > "$V6_CACHE_FILE"
+        else
+            # IP 未变，跳过 API 提交
+            true
         fi
     fi
 fi
@@ -150,32 +108,38 @@ fi
 exit 0
 EOF
 
-    chmod +x "$SCRIPT_PATH"
+# 替换脚本中的变量占位符
+sed -i "s|REPLACE_CF_TOKEN|$CF_TOKEN|g" /usr/local/bin/cf-ddns.sh
+sed -i "s|REPLACE_ZONE_ID|$ZONE_ID|g" /usr/local/bin/cf-ddns.sh
+sed -i "s|REPLACE_NAME_V4|$NAME_V4|g" /usr/local/bin/cf-ddns.sh
+sed -i "s|REPLACE_NAME_V6|$NAME_V6|g" /usr/local/bin/cf-ddns.sh
 
-    # 定时任务配置
-    if [ -f /etc/alpine-release ]; then
-        (crontab -l 2>/dev/null | grep -v "cf-ddns.sh"; echo "*/5 * * * * /usr/local/bin/cf-ddns.sh >/dev/null 2>&1") | crontab -
-        echo "✅ OpenRC/Crontab 定时任务配置成功（每 5 分钟检查一次）。"
-    else
-        systemctl stop cf-ddns.timer 2>/dev/null
-        systemctl disable cf-ddns.timer 2>/dev/null
-        rm -f "$SERVICE_PATH" "$TIMER_PATH"
+chmod +x /usr/local/bin/cf-ddns.sh
 
-        cat << EOF > "$SERVICE_PATH"
+# --- 4. 配置定时任务 ---
+if [ -f /etc/alpine-release ]; then
+    (crontab -l 2>/dev/null | grep -v "cf-ddns.sh"; echo "*/5 * * * * /usr/local/bin/cf-ddns.sh >/dev/null 2>&1") | crontab -
+else
+    # 清理旧的 systemd 服务
+    systemctl stop cf-ddns.timer 2>/dev/null
+    systemctl disable cf-ddns.timer 2>/dev/null
+    rm -f /etc/systemd/system/cf-ddns.service /etc/systemd/system/cf-ddns.timer
+
+    cat << EOF > /etc/systemd/system/cf-ddns.service
 [Unit]
-Description=Cloudflare DDNS Update Service with Cache
+Description=Cloudflare DDNS Update with Cache
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-ExecStart=$SCRIPT_PATH
+ExecStart=/usr/local/bin/cf-ddns.sh
 EOF
 
-        cat << EOF > "$TIMER_PATH"
+    cat << EOF > /etc/systemd/system/cf-ddns.timer
 [Unit]
-Description=Run Cloudflare DDNS every 5 minutes
+Description=Run CF DDNS every 5 minutes
 
 [Timer]
 OnBootSec=1min
@@ -185,68 +149,14 @@ OnUnitActiveSec=5min
 WantedBy=timers.target
 EOF
 
-        systemctl daemon-reload
-        systemctl enable --now cf-ddns.timer
-        echo "✅ Systemd 定时器服务配置成功并已启动！"
-    }
+    systemctl daemon-reload
+    systemctl enable --now cf-ddns.timer
+fi
 
-    echo -e "\n🎉 安装/更新完成！正在执行一次初始化测试..."
-    "$SCRIPT_PATH"
-    read -p "按回车键返回主菜单..."
-}
+echo -e "\n🎉 安装完成！正在测试初次运行..."
+if /usr/local/bin/cf-ddns.sh; then
+    echo "✅ 初始化测试成功！IP 缓存已存入 /var/lib/cf-ddns/ 目录。"
+else
+    echo "⚠️ 初次运行遇到问题，请检查 Token 和 Zone ID 是否正确。"
+fi
 
-run_manual() {
-    if [ ! -f "$SCRIPT_PATH" ]; then
-        echo "❌ 核心脚本不存在，请先安装配置！"
-    else
-        echo "🚀 正在手动执行 DDNS 更新脚本..."
-        "$SCRIPT_PATH"
-        echo "✅ 执行完毕。"
-    fi
-    read -p "按回车键返回主菜单..."
-}
-
-view_logs() {
-    echo "====================================================="
-    echo "        最近的 DDNS 运行日志 (按 q 退出)"
-    echo "====================================================="
-    if [ -f /etc/alpine-release ]; then
-        echo "Alpine 系统请通过 crontab 或查看相关系统日志了解运行情况。"
-    else
-        journalctl -u cf-ddns.service -n 50 --no-pager
-    fi
-    echo "-----------------------------------------------------"
-    read -p "按回车键返回主菜单..."
-}
-
-uninstall_ddns() {
-    read -p "⚠️ 确认要完全卸载 Cloudflare DDNS 吗？[y/N]: " confirm
-    if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        rm -f "$CONFIG_FILE" "$SCRIPT_PATH"
-        rm -rf "/var/lib/cf-ddns"
-        if [ -f /etc/alpine-release ]; then
-            crontab -l 2>/dev/null | grep -v "cf-ddns.sh" | crontab -
-        else
-            systemctl disable --now cf-ddns.timer 2>/dev/null
-            rm -f "$SERVICE_PATH" "$TIMER_PATH"
-            systemctl daemon-reload
-        fi
-        echo "✅ 已完全卸载。"
-    else
-        echo "已取消卸载。"
-    fi
-    read -p "按回车键返回主菜单..."
-}
-
-# 主循环
-while true; do
-    show_menu
-    case "$CHOICE" in
-        1) install_ddns ;;
-        2) run_manual ;;
-        3) view_logs ;;
-        4) uninstall_ddns ;;
-        0) echo "再见！"; exit 0 ;;
-        *) echo "无效的选择，请重新输入。"; sleep 1 ;;
-    esac
-done
