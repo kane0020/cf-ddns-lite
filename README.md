@@ -33,7 +33,7 @@
 使用 root 权限或 sudo 执行以下命令即可开始交互式安装：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kane0020/cf-ddns-lite/main/install.sh | sudo bash
+curl -O https://raw.githubusercontent.com/kane0020/cf-ddns-lite/main/install.sh && sed -i 's/\r$//' install.sh && chmod +x install.sh && sudo ./install.sh
 ```
 
 ---
